@@ -7,15 +7,24 @@
 - According to the following setup, download the python files in Github and apply them:
 
   /New folder created
+  
     /app.py (file in Github)
+  
     /models (folder)
+  
       /best.pt
+  
     /results (empty folder)
+  
     /uploads (empty folder)
+  
     /templates
+  
       /index.html
+  
     /utils
-      /analysis.py
+  
+      /analysis.py 
 
 - Modify the path in file "app.py" to suit your own computer
 
