@@ -1,4 +1,6 @@
+# app.py
 import os
+import glob
 import cv2
 import math
 import base64
@@ -8,7 +10,6 @@ import queue
 import threading
 import time
 import numpy as np
-from pylab import mpl
 from datetime import datetime
 from io import BytesIO
 from flask import Flask, request, render_template, send_file, jsonify
@@ -35,9 +36,19 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading',
 
 UPLOAD_FOLDER = 'uploads'
 RESULTS_FOLDER = 'results'
-MODEL_PATH = "E:/CUPEC/Website_Version_4/models/best.pt"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RESULTS_FOLDER, exist_ok=True)
+
+# 自动使用"最新一次训练"生成的 best.pt（按文件夹的修改时间选择）
+TRAIN_RESULTS_ROOT = "C:/CUPEC_National_Contest/Model_Training/Results"
+def find_latest_best_pt():
+    candidates = glob.glob(os.path.join(TRAIN_RESULTS_ROOT, "*", "weights", "best.pt"))
+    if candidates:
+        return max(candidates, key=os.path.getmtime)
+    return "models/best.pt"  # 兜底：没找到训练结果时用本地 models 目录
+
+MODEL_PATH = find_latest_best_pt()
+print(f"加载模型: {MODEL_PATH}")
 
 ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv'}
 
@@ -444,7 +455,7 @@ def handle_stop_camera():
         emit('error', {'message': '数据点太少，无法计算李雅普诺夫指数（至少需要50帧）'})
         return
     
-    dt = 1.0 / 10.0  # 摄像头采样间隔200ms = 5fps
+    dt = 1.0 / 30.0  # 摄像头采样间隔200ms = 5fps
     lyap_result = compute_full_lyapunov_spectrum(velocities, dt=dt)
     lyap_plot_b64 = plot_divergence_to_base64(
         lyap_result['divergence_curve'],
