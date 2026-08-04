@@ -1,0 +1,449 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>混沌摆双模式分析平台</title>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; margin: 20px; background: #f5f7fa; }
+        h1 { color: #2c3e50; margin-bottom: 10px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        #mode-selector { margin-bottom: 20px; display: flex; gap: 10px; }
+        #mode-selector button {
+            padding: 10px 25px; border: none; border-radius: 6px; cursor: pointer;
+            font-size: 16px; background: #ecf0f1; transition: all 0.3s;
+        }
+        #mode-selector button.active { background: #3498db; color: white; box-shadow: 0 4px 12px rgba(52,152,219,0.4); }
+        .section { background: white; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        .section h2 { margin-top: 0; color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 8px; display: inline-block; }
+        button { padding: 10px 20px; background: #3498db; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; margin: 5px; }
+        button:hover { background: #2980b9; }
+        button:disabled { background: #bdc3c7; cursor: not-allowed; }
+        #videoInput, #motorSpeedInput { padding: 8px; border: 2px dashed #bdc3c7; border-radius: 6px; margin-right: 10px; }
+        #motorSpeedInput { width: 120px; }
+        .flex-row { display: flex; gap: 20px; flex-wrap: wrap; }
+        .canvas-container { flex: 1; min-width: 400px; }
+        canvas { border: 2px solid #ecf0f1; border-radius: 8px; background: #fff; max-width: 100%; }
+        #status { font-weight: bold; color: #e67e22; margin-left: 15px; }
+        .download-btn { display: inline-block; margin: 5px; padding: 8px 16px; background: #27ae60; color: white; text-decoration: none; border-radius: 4px; }
+        #compare-section { display: none; }
+        #lyapunov-section { display: none; }
+        #recent-list { list-style: none; padding: 0; }
+        #recent-list li { padding: 8px; background: #ecf0f1; margin: 5px 0; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; }
+        .speed-badge { background: #3498db; color: white; padding: 2px 10px; border-radius: 12px; font-size: 12px; }
+        .lyap-positive { color: #e74c3c; font-weight: bold; }
+        .lyap-negative { color: #27ae60; font-weight: bold; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>混沌摆双模式分析平台</h1>
+
+    <div id="mode-selector">
+        <button id="btn-upload" class="active">上传视频分析</button>
+        <button id="btn-camera">实时摄像头分析</button>
+    </div>
+
+    <div id="upload-section" class="section">
+        <h2>上传视频</h2>
+        <input type="file" id="videoInput" accept="video/*">
+        <label for="motorSpeedInput">电机转速 (rpm):</label>
+        <input type="number" id="motorSpeedInput" value="0" step="1" min="0">
+        <button id="uploadBtn">开始分析</button>
+        <span id="status">等待上传...</span>
+        <div id="csv-download-area"></div>
+    </div>
+
+    <div id="camera-section" class="section" style="display:none;">
+        <h2>实时摄像头</h2>
+        <button id="startCameraBtn">开启摄像头</button>
+        <button id="stopCameraBtn" disabled>停止分析</button>
+        <div style="margin-top:10px;"><video id="cameraVideo" autoplay playsinline width="400"></video></div>
+    </div>
+
+    <!-- 李雅普诺夫指数结果 -->
+    <div class="section" id="lyapunov-section">
+        <h2>李雅普诺夫指数分析</h2>
+        <div id="lyapunov-result">
+            <p>最大李雅普诺夫指数: <span id="lyap-value" style="font-size:1.3em;">--</span></p>
+            <p>结论: <span id="lyap-conclusion">--</span></p>
+            <img id="lyap-plot" src="" alt="发散曲线图" style="max-width:100%; display:none; margin-top:10px; border-radius:8px;">
+        </div>
+    </div>
+
+    <!-- 最近分析记录 -->
+    <div class="section" id="recent-section">
+        <h2>最近分析记录</h2>
+        <ul id="recent-list"><li>暂无分析记录</li></ul>
+        <button id="compareBtn" style="display:none;">对比这两个结果</button>
+    </div>
+
+    <div class="flex-row">
+        <div class="canvas-container section">
+            <h2>实时标注画面</h2>
+            <canvas id="videoCanvas" width="640" height="480"></canvas>
+        </div>
+        <div class="canvas-container section">
+            <h2>相空间轨迹（角度-角速度）</h2>
+            <canvas id="phaseCanvas" width="600" height="400"></canvas>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>角速度随时间变化</h2>
+        <canvas id="velocityChart" width="800" height="250"></canvas>
+    </div>
+
+    <div class="section" id="compare-section">
+        <h2>角速度对比（转速 vs 转速）</h2>
+        <canvas id="compareChart" width="800" height="350"></canvas>
+    </div>
+</div>
+
+<script>
+    const socket = io();
+    let currentMode = 'upload';
+    let cameraInterval;
+
+    document.getElementById('btn-upload').onclick = () => switchMode('upload');
+    document.getElementById('btn-camera').onclick = () => switchMode('camera');
+    function switchMode(mode) {
+        currentMode = mode;
+        document.getElementById('btn-upload').classList.toggle('active', mode==='upload');
+        document.getElementById('btn-camera').classList.toggle('active', mode==='camera');
+        document.getElementById('upload-section').style.display = mode==='upload' ? 'block' : 'none';
+        document.getElementById('camera-section').style.display = mode==='camera' ? 'block' : 'none';
+        clearPhaseCanvas();
+        clearVelocityChart();
+        if (mode==='upload' && cameraInterval) { clearInterval(cameraInterval); stopCameraStream(); }
+    }
+
+    const phaseCanvas = document.getElementById('phaseCanvas');
+    const pctx = phaseCanvas.getContext('2d');
+    const phaseWidth = 600, phaseHeight = 400;
+    // 相图纵轴(角速度)自适应：根据数据范围动态调整，而不是固定 [-80, 80]
+    const DEFAULT_V_MIN = -80, DEFAULT_V_MAX = 80;
+
+    // 相图数据：角度做"解缠绕(unwrap)"处理，保证轨迹连续、不会在 0/2π 边界被切开
+    let phaseData = [];        // [{u: 解缠绕后的角度, v: 角速度, valid: 是否有效}]
+    let prevRawAngle = null;   // 上一帧原始角度（用于解缠绕）
+    let lastUnwrapped = null;  // 上一帧解缠绕后的角度
+
+    function unwrapAngle(rawAngle) {
+        if (prevRawAngle === null) {
+            prevRawAngle = rawAngle;
+            lastUnwrapped = rawAngle;
+            return rawAngle;
+        }
+        let d = rawAngle - prevRawAngle;
+        while (d > Math.PI) d -= 2 * Math.PI;   // 正向跨过接缝：减去 2π
+        while (d < -Math.PI) d += 2 * Math.PI;  // 反向跨过接缝：加上 2π
+        prevRawAngle = rawAngle;
+        lastUnwrapped += d;
+        return lastUnwrapped;
+    }
+
+    function drawAxes(lo, hi, yLo, yHi) {
+        pctx.save();
+        pctx.strokeStyle = 'rgba(180, 180, 180, 0.6)';
+        pctx.lineWidth = 1;
+        // 横轴(角度)中线 & 纵轴(角速度)
+        pctx.beginPath(); pctx.moveTo(0, phaseHeight / 2); pctx.lineTo(phaseWidth, phaseHeight / 2); pctx.stroke();
+        pctx.beginPath(); pctx.moveTo(0, 0); pctx.lineTo(0, phaseHeight); pctx.stroke();
+        pctx.fillStyle = '#888'; pctx.font = '12px sans-serif';
+        pctx.fillText('角度 (rad)', phaseWidth - 80, phaseHeight / 2 - 8);
+        pctx.fillText('角速度 (rad/s)', 8, 16);
+
+        // 角速度刻度（自适应纵轴）
+        if (yHi !== undefined && yHi > yLo) {
+            const ySpan = yHi - yLo;
+            pctx.font = '10px sans-serif';
+            const n = 4;
+            for (let i = 0; i <= n; i++) {
+                const v = yLo + ySpan * i / n;
+                const y = phaseHeight - (v - yLo) / ySpan * phaseHeight;
+                pctx.beginPath(); pctx.moveTo(0, y); pctx.lineTo(4, y); pctx.stroke();
+                pctx.fillText(v.toFixed(1), 8, y + 4);
+            }
+            // 0 参考线（若在显示范围内）
+            const y0 = phaseHeight - (0 - yLo) / ySpan * phaseHeight;
+            if (y0 > 0 && y0 < phaseHeight) {
+                pctx.strokeStyle = 'rgba(120, 120, 120, 0.5)';
+                pctx.beginPath(); pctx.moveTo(0, y0); pctx.lineTo(phaseWidth, y0); pctx.stroke();
+                pctx.strokeStyle = 'rgba(180, 180, 180, 0.6)';
+            }
+        }
+        // 角度刻度（随解缠绕后的数据范围动态变化）
+        if (hi !== undefined && hi > lo) {
+            const n = 5;
+            pctx.font = '10px sans-serif';
+            for (let i = 0; i <= n; i++) {
+                const a = lo + (hi - lo) * i / n;
+                const x = (a - lo) / (hi - lo) * phaseWidth;
+                pctx.beginPath(); pctx.moveTo(x, phaseHeight / 2 - 4); pctx.lineTo(x, phaseHeight / 2 + 4); pctx.stroke();
+                pctx.fillText(a.toFixed(2), x - 12, phaseHeight / 2 + 18);
+            }
+        }
+        pctx.restore();
+    }
+
+    function clearPhaseCanvas() {
+        phaseData = [];
+        prevRawAngle = null;
+        lastUnwrapped = null;
+        pctx.clearRect(0, 0, phaseWidth, phaseHeight);
+        drawAxes(0, 2 * Math.PI, DEFAULT_V_MIN, DEFAULT_V_MAX);
+    }
+
+    // 重绘整个相图：连线 + 轨迹点；横轴、纵轴均随数据范围自适应
+    function redrawPhase() {
+        let lo = null, hi = null, yLo = null, yHi = null;
+        for (const p of phaseData) {
+            if (!p.valid) continue;
+            if (lo === null || p.u < lo) lo = p.u;
+            if (hi === null || p.u > hi) hi = p.u;
+            if (yLo === null || p.v < yLo) yLo = p.v;
+            if (yHi === null || p.v > yHi) yHi = p.v;
+        }
+        if (lo === null) { pctx.clearRect(0, 0, phaseWidth, phaseHeight); drawAxes(0, 2 * Math.PI, DEFAULT_V_MIN, DEFAULT_V_MAX); return; }
+
+        // 横轴(角度)留边
+        const xSpan = Math.max(hi - lo, 0.5);
+        lo -= xSpan * 0.05;
+        hi += xSpan * 0.05;
+        // 纵轴(角速度)留边 + 最小显示范围，避免刚启动时剧烈跳动
+        let ySpan = yHi - yLo;
+        if (ySpan < 1e-6) ySpan = 1.0;
+        yLo -= ySpan * 0.10;
+        yHi += ySpan * 0.10;
+        const minYSpan = 20.0;
+        if (yHi - yLo < minYSpan) {
+            const c = (yHi + yLo) / 2;
+            yLo = c - minYSpan / 2;
+            yHi = c + minYSpan / 2;
+        }
+
+        pctx.clearRect(0, 0, phaseWidth, phaseHeight);
+        drawAxes(lo, hi, yLo, yHi);
+
+        const xOf = u => (u - lo) / (hi - lo) * phaseWidth;
+        const yOf = v => phaseHeight - (v - yLo) / (yHi - yLo) * phaseHeight;
+
+        // 连线：相邻有效点连成一条连续轨迹（检测失败的帧处断开）
+        pctx.strokeStyle = 'rgba(0, 80, 255, 0.65)';
+        pctx.lineWidth = 1;
+        pctx.beginPath();
+        let penDown = false;
+        for (const p of phaseData) {
+            if (!p.valid) { penDown = false; continue; }
+            const x = xOf(p.u), y = yOf(p.v);
+            if (penDown) pctx.lineTo(x, y);
+            else pctx.moveTo(x, y);
+            penDown = true;
+        }
+        pctx.stroke();
+
+        // 叠加轨迹点（淡红色，保留"吸引子云团"效果）
+        pctx.fillStyle = 'rgba(255, 0, 0, 0.22)';
+        for (const p of phaseData) {
+            if (!p.valid) continue;
+            pctx.beginPath(); pctx.arc(xOf(p.u), yOf(p.v), 1.5, 0, 2 * Math.PI); pctx.fill();
+        }
+    }
+
+    // 绘制相点：角度解缠绕 + 累积轨迹 + 连线（完整、连续、不切分）
+    function drawPhasePoint(angle, angular_velocity) {
+        const valid = !(angle === 0 && angular_velocity === 0); // 后端检测失败时发 (0,0)
+        const u = valid ? unwrapAngle(angle) : null;
+        phaseData.push({ u: u, v: angular_velocity, valid: valid });
+        if (phaseData.length > 30000) phaseData.splice(0, 3000); // 防止内存无限增长
+        redrawPhase();
+    }
+    drawAxes(0, 2 * Math.PI, DEFAULT_V_MIN, DEFAULT_V_MAX);
+
+    const velCtx = document.getElementById('velocityChart').getContext('2d');
+    let velocityChart = new Chart(velCtx, {
+        type: 'line', data: { labels: [], datasets: [{ label: '角速度 (rad/s)', data: [], borderColor: 'rgb(75,192,192)', tension: 0.1, pointRadius: 0 }] },
+        options: { responsive: true, animation: false, scales: { x: { title: { display: true, text: '帧索引' } }, y: { title: { display: true, text: '角速度 (rad/s)' } } } }
+    });
+    function clearVelocityChart() {
+        velocityChart.data.labels = [];
+        velocityChart.data.datasets[0].data = [];
+        velocityChart.options.scales.y.min = undefined;
+        velocityChart.options.scales.y.max = undefined;
+        velocityChart.update();
+    }
+    function updateVelocityChart(value, frameIndex) {
+        if (frameIndex === undefined) frameIndex = velocityChart.data.labels.length;
+        velocityChart.data.labels.push(frameIndex);
+        velocityChart.data.datasets[0].data.push(value);
+        if (velocityChart.data.labels.length > 200) { velocityChart.data.labels.shift(); velocityChart.data.datasets[0].data.shift(); }
+        // 自适应纵轴
+        const arr = velocityChart.data.datasets[0].data;
+        if (arr.length > 0) {
+            let mn = Math.min(...arr), mx = Math.max(...arr);
+            let pad = Math.max((mx - mn) * 0.15, 2.0);
+            velocityChart.options.scales.y.min = mn - pad;
+            velocityChart.options.scales.y.max = mx + pad;
+        }
+        velocityChart.update();
+    }
+
+    let recentAnalyses = [];
+    function updateRecentList() {
+        fetch('/api/recent').then(r => r.json()).then(data => {
+            recentAnalyses = data;
+            const list = document.getElementById('recent-list');
+            const btn = document.getElementById('compareBtn');
+            if (data.length === 0) {
+                list.innerHTML = '<li>暂无分析记录</li>';
+                btn.style.display = 'none';
+            } else {
+                list.innerHTML = data.map(r => 
+                    `<li>
+                        <span>转速: <span class="speed-badge">${r.motor_speed} rpm</span> | 帧数: ${r.total_frames}</span>
+                        <span>λ = ${r.lyapunov_exponent !== undefined ? r.lyapunov_exponent : '--'}</span>
+                        <a href="${r.csv_download}" class="download-btn">CSV</a>
+                    </li>`
+                ).join('');
+                btn.style.display = data.length >= 2 ? 'inline-block' : 'none';
+            }
+        });
+    }
+
+    let compareChart = null;
+    document.getElementById('compareBtn').onclick = async () => {
+        if (recentAnalyses.length < 2) return alert('需要至少两次分析结果才能对比');
+        const id1 = recentAnalyses[0].id;
+        const id2 = recentAnalyses[1].id;
+        const speed1 = recentAnalyses[0].motor_speed;
+        const speed2 = recentAnalyses[1].motor_speed;
+        const [data1, data2] = await Promise.all([
+            fetch(`/api/velocity_data/${id1}`).then(r => r.json()),
+            fetch(`/api/velocity_data/${id2}`).then(r => r.json())
+        ]);
+        document.getElementById('compare-section').style.display = 'block';
+        const ctx = document.getElementById('compareChart').getContext('2d');
+        if (compareChart) compareChart.destroy();
+        compareChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [...Array(Math.max(data1.velocities.length, data2.velocities.length)).keys()],
+                datasets: [
+                    { label: `${speed1} rpm`, data: data1.velocities, borderColor: 'rgb(255, 99, 132)', tension: 0.1, pointRadius: 0 },
+                    { label: `${speed2} rpm`, data: data2.velocities, borderColor: 'rgb(54, 162, 235)', tension: 0.1, pointRadius: 0 }
+                ]
+            },
+            options: {
+                responsive: true,
+                scales: { x: { title: { display: true, text: '帧索引' } }, y: { title: { display: true, text: '角速度 (rad/s)' } } },
+                plugins: { title: { display: true, text: `角速度对比：${speed1} rpm vs ${speed2} rpm` } }
+            }
+        });
+    };
+
+    // WebSocket 事件
+    socket.on('phase_point', (data) => {
+        drawPhasePoint(data.angle, data.angular_velocity);
+        updateVelocityChart(data.angular_velocity, null);
+    });
+    socket.on('frame_data', (data) => {
+        const canvas = document.getElementById('videoCanvas');
+        const ctx = canvas.getContext('2d');
+        const img = new Image();
+        img.onload = () => { canvas.width = img.width; canvas.height = img.height; ctx.drawImage(img, 0, 0); };
+        img.src = 'data:image/jpeg;base64,' + data.image;
+        if (data.angle !== undefined) drawPhasePoint(data.angle, data.angular_velocity);
+        updateVelocityChart(data.angular_velocity, data.frame_index);
+    });
+
+    // 李雅普诺夫结果
+    socket.on('lyapunov_result', (data) => {
+        document.getElementById('lyapunov-section').style.display = 'block';
+        const valueEl = document.getElementById('lyap-value');
+        valueEl.textContent = data.lyapunov_exponent;
+        valueEl.className = data.is_chaotic ? 'lyap-positive' : 'lyap-negative';
+        document.getElementById('lyap-conclusion').textContent = data.conclusion;
+        if (data.plot_base64) {
+            const img = document.getElementById('lyap-plot');
+            img.src = data.plot_base64;
+            img.style.display = 'block';
+        } else if (data.plot_url) {
+            const img = document.getElementById('lyap-plot');
+            img.src = data.plot_url;
+            img.style.display = 'block';
+        }
+    });
+
+    socket.on('processing_done', (data) => {
+        document.getElementById('status').innerText = `处理完成：${data.motor_speed} rpm，共 ${data.total_frames} 帧`;
+        if (data.csv_download) {
+            const area = document.getElementById('csv-download-area');
+            area.innerHTML = '';
+            const a = document.createElement('a');
+            a.href = data.csv_download; a.textContent = '下载详细数据 (CSV)';
+            a.className = 'download-btn'; a.download = '';
+            area.appendChild(a);
+        }
+        updateRecentList();
+    });
+    socket.on('recent_updated', () => updateRecentList());
+    socket.on('error', (data) => alert('出错：' + data.message));
+    socket.on('status', (data) => document.getElementById('status').innerText = data.message);
+
+    // 上传视频
+    document.getElementById('uploadBtn').onclick = async () => {
+        const file = document.getElementById('videoInput').files[0];
+        if (!file) return alert('请选择视频文件');
+        const motorSpeed = parseInt(document.getElementById('motorSpeedInput').value) || 0;
+        document.getElementById('status').innerText = '上传中...';
+        const form = new FormData(); form.append('video', file);
+        const resp = await fetch('/upload', { method: 'POST', body: form });
+        const res = await resp.json();
+        if (res.success) {
+            document.getElementById('status').innerText = '处理中...';
+            clearPhaseCanvas(); clearVelocityChart();
+            document.getElementById('lyapunov-section').style.display = 'none';
+            socket.emit('process_video', { filename: res.filename, motor_speed: motorSpeed });
+        } else alert('上传失败：' + res.message);
+    };
+
+    // 实时摄像头
+    document.getElementById('startCameraBtn').onclick = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+            const video = document.getElementById('cameraVideo');
+            video.srcObject = stream; await video.play();
+            document.getElementById('startCameraBtn').disabled = true;
+            document.getElementById('stopCameraBtn').disabled = false;
+            clearPhaseCanvas(); clearVelocityChart();
+            cameraInterval = setInterval(() => {
+                if (video.readyState < video.HAVE_ENOUGH_DATA) return;
+                const c = document.createElement('canvas'); c.width = video.videoWidth; c.height = video.videoHeight;
+                c.getContext('2d').drawImage(video, 0, 0);
+                socket.emit('process_frame', { image: c.toDataURL('image/jpeg', 0.95) });
+            }, 200);
+            document.getElementById('status').innerText = '摄像头分析中...';
+        } catch (e) { alert('无法访问摄像头：' + e.message); }
+    };
+    document.getElementById('stopCameraBtn').addEventListener('click', () => {
+        clearInterval(cameraInterval);
+        stopCameraStream();
+        document.getElementById('status').innerText = '摄像头已停止，正在计算李雅普诺夫指数...';
+        socket.emit('stop_camera');
+    });
+    function stopCameraStream() {
+        const video = document.getElementById('cameraVideo');
+        if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+        document.getElementById('startCameraBtn').disabled = false;
+        document.getElementById('stopCameraBtn').disabled = true;
+    }
+    window.addEventListener('beforeunload', () => { if (cameraInterval) clearInterval(cameraInterval); stopCameraStream(); });
+
+    updateRecentList();
+</script>
+</body>
+</html>
